@@ -22,6 +22,8 @@ import com.example.service.TaskCategoryPlanner
 import com.example.util.WebProxyManager
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -30,6 +32,8 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 import java.util.UUID
 
@@ -384,23 +388,28 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
 
     fun testProxy(proxy: ProxyItem, onResult: (Boolean, String) -> Unit) {
         viewModelScope.launch {
-            val startTime = System.currentTimeMillis()
-            val geo = IdentityService.fetchGeoInfo(proxy.host, proxy.port, proxy.type, proxy.username, proxy.password)
-            val ping = System.currentTimeMillis() - startTime
-            val isWorking = geo.ip.isNotBlank() &&
-                    geo.ip != "Proxy Unreachable" &&
-                    !geo.ip.contains("Error", ignoreCase = true) &&
-                    !geo.ip.contains("Offline", ignoreCase = true) &&
-                    !geo.ip.contains("No Internet", ignoreCase = true)
+            val res = withContext(Dispatchers.IO) {
+                IdentityService.testProxyConnection(
+                    host = proxy.host,
+                    port = proxy.port,
+                    type = proxy.type,
+                    user = proxy.username,
+                    pass = proxy.password,
+                    timeoutMs = 9000
+                )
+            }
+            val isWorking = res.first
+            val details = res.second
+            val ping = res.third
             withContext(Dispatchers.IO) {
                 proxyDao.updateProxyStatus(proxy.id, if (isWorking) "working" else "failed", ping)
             }
             if (isWorking) {
-                addLog("success", "Proxy ${proxy.host}:${proxy.port} working! Exit IP: ${geo.ip} (${geo.city}, ${geo.country}) - ${ping}ms")
-                onResult(true, "Working: ${geo.ip} (${geo.city}, ${geo.countryCode}) - ${ping}ms")
+                addLog("success", "Proxy ${proxy.host}:${proxy.port} ONLINE! Exit: $details - ${ping}ms")
+                onResult(true, "Online: $details (${ping}ms)")
             } else {
-                addLog("error", "Proxy ${proxy.host}:${proxy.port} test failed (${geo.ip})")
-                onResult(false, "Connection failed: ${geo.ip}")
+                addLog("error", "Proxy ${proxy.host}:${proxy.port} failed: $details")
+                onResult(false, "Failed: $details (${ping}ms)")
             }
         }
     }
@@ -414,18 +423,13 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         onResult: (Boolean, String) -> Unit
     ) {
         viewModelScope.launch {
-            val startTime = System.currentTimeMillis()
-            val geo = IdentityService.fetchGeoInfo(host, port, type, user, pass)
-            val ping = System.currentTimeMillis() - startTime
-            val isWorking = geo.ip.isNotBlank() &&
-                    geo.ip != "Proxy Unreachable" &&
-                    !geo.ip.contains("Error", ignoreCase = true) &&
-                    !geo.ip.contains("Offline", ignoreCase = true) &&
-                    !geo.ip.contains("No Internet", ignoreCase = true)
-            if (isWorking) {
-                onResult(true, "Working: ${geo.ip} (${geo.city}, ${geo.countryCode}) - ${ping}ms")
+            val res = withContext(Dispatchers.IO) {
+                IdentityService.testProxyConnection(host, port, type, user, pass, timeoutMs = 9000)
+            }
+            if (res.first) {
+                onResult(true, "Working: ${res.second} - ${res.third}ms")
             } else {
-                onResult(false, "Failed: ${geo.ip}")
+                onResult(false, "Failed: ${res.second}")
             }
         }
     }
@@ -440,32 +444,95 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 onComplete(0, 0)
                 return@launch
             }
-            addLog("info", "Starting batch proxy verification for ${list.size} proxies...")
-            var working = 0
-            var failed = 0
-            list.forEachIndexed { index, proxy ->
-                onProgress(index + 1, list.size)
-                val startTime = System.currentTimeMillis()
-                val geo = IdentityService.fetchGeoInfo(proxy.host, proxy.port, proxy.type, proxy.username, proxy.password)
-                val ping = System.currentTimeMillis() - startTime
-                val isWorking = geo.ip.isNotBlank() &&
-                        geo.ip != "Proxy Unreachable" &&
-                        !geo.ip.contains("Error", ignoreCase = true) &&
-                        !geo.ip.contains("Offline", ignoreCase = true) &&
-                        !geo.ip.contains("No Internet", ignoreCase = true)
-                withContext(Dispatchers.IO) {
-                    proxyDao.updateProxyStatus(proxy.id, if (isWorking) "working" else "failed", ping)
+            addLog("info", "بدء فحص مجموعة البروكسيات (${list.size} بروكسي) بسرعة متوازية...")
+            val total = list.size
+            val progressCount = java.util.concurrent.atomic.AtomicInteger(0)
+            val workingCount = java.util.concurrent.atomic.AtomicInteger(0)
+            val failedCount = java.util.concurrent.atomic.AtomicInteger(0)
+
+            val semaphore = Semaphore(5)
+
+            withContext(Dispatchers.IO) {
+                val jobs = list.map { proxy ->
+                    async {
+                        semaphore.withPermit {
+                            val res = IdentityService.testProxyConnection(
+                                host = proxy.host,
+                                port = proxy.port,
+                                type = proxy.type,
+                                user = proxy.username,
+                                pass = proxy.password,
+                                timeoutMs = 8000
+                            )
+                            val isWorking = res.first
+                            val ping = res.third
+
+                            proxyDao.updateProxyStatus(
+                                id = proxy.id,
+                                status = if (isWorking) "working" else "failed",
+                                ping = ping
+                            )
+
+                            val done = progressCount.incrementAndGet()
+                            if (isWorking) {
+                                workingCount.incrementAndGet()
+                                addLog("success", "[#$done/$total] ✅ ${proxy.host}:${proxy.port} ONLINE (${res.second}) - ${ping}ms")
+                            } else {
+                                failedCount.incrementAndGet()
+                                addLog("warning", "[#$done/$total] ❌ ${proxy.host}:${proxy.port} OFFLINE (${res.second})")
+                            }
+                            withContext(Dispatchers.Main) {
+                                onProgress(done, total)
+                            }
+                        }
+                    }
                 }
-                if (isWorking) {
-                    working++
-                    addLog("success", "[#${index + 1}/${list.size}] Proxy ${proxy.host}:${proxy.port} ONLINE: ${geo.ip} (${geo.city}, ${geo.countryCode}) - ${ping}ms")
-                } else {
-                    failed++
-                    addLog("warning", "[#${index + 1}/${list.size}] Proxy ${proxy.host}:${proxy.port} OFFLINE (${geo.ip})")
-                }
+                jobs.awaitAll()
             }
-            addLog("info", "Batch verification completed: $working working, $failed failed.")
-            onComplete(working, failed)
+
+            val finalWorking = workingCount.get()
+            val finalFailed = failedCount.get()
+            addLog("info", "اكتمل فحص البروكسيات: $finalWorking شغالة ✅ | $finalFailed معطلة ❌")
+            onComplete(finalWorking, finalFailed)
+        }
+    }
+
+    fun deleteFailedProxies(onResult: ((Int) -> Unit)? = null) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val deleted = proxyDao.deleteFailedProxies()
+            addLog("info", "تم حذف $deleted بروكسي معطل من القائمة.")
+            withContext(Dispatchers.Main) {
+                onResult?.invoke(deleted)
+            }
+        }
+    }
+
+    fun autoSelectFastestProxy(onResult: ((ProxyItem?) -> Unit)? = null) {
+        viewModelScope.launch {
+            val fastest = withContext(Dispatchers.IO) {
+                val working = proxyDao.getWorkingProxies()
+                working.filter { it.lastPingMs > 0 }.minByOrNull { it.lastPingMs } ?: working.firstOrNull()
+            }
+            if (fastest != null) {
+                setActiveProxy(fastest)
+                addLog("success", "تم تفعيل أسرع بروكسي: ${fastest.host}:${fastest.port} (${fastest.lastPingMs}ms)")
+            } else {
+                addLog("warning", "لا توجد بروكسيات صالحة في القائمة حالياً. يرجى فحص البروكسيات أولاً.")
+            }
+            onResult?.invoke(fastest)
+        }
+    }
+
+    fun getWorkingProxiesFormatted(): String {
+        val list = proxies.value
+        val working = list.filter { it.status == "working" }
+        val targetList = if (working.isNotEmpty()) working else list
+        return targetList.joinToString("\n") { p ->
+            if (p.username.isNotBlank() && p.password.isNotBlank()) {
+                "${p.host}:${p.port}:${p.username}:${p.password}"
+            } else {
+                "${p.host}:${p.port}"
+            }
         }
     }
 
@@ -877,7 +944,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         _automationState.update { it.copy(phase = "fetching_geo", phaseDetail = "Updating IP & Geo info...") }
         var s = _settings.value
         if (s.proxyAutoRotate) {
-            val nextProxy = proxyDao.getNextProxy()
+            val nextProxy = proxyDao.getNextWorkingProxy() ?: proxyDao.getNextProxy()
             if (nextProxy != null) {
                 proxyDao.markProxyUsed(nextProxy.id)
                 s = s.copy(

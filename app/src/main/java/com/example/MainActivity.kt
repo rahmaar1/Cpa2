@@ -481,7 +481,10 @@ fun CpaAutomatorApp(vm: AppViewModel = viewModel()) {
                     onDeleteProxy = { vm.deleteProxy(it) },
                     onClearAll = { vm.clearAllProxies() },
                     onToggleAutoRotate = { vm.updateSettings(settings.copy(proxyAutoRotate = it)) },
-                    onTestAllProxies = { onProg, onComp -> vm.testAllProxies(onProg, onComp) }
+                    onTestAllProxies = { onProg, onComp -> vm.testAllProxies(onProg, onComp) },
+                    onDeleteFailed = { vm.deleteFailedProxies() },
+                    onAutoSelectFastest = { vm.autoSelectFastestProxy() },
+                    onExportWorking = { vm.getWorkingProxiesFormatted() }
                 )
                 ScreenTab.SCRIPTS -> ScriptsScreen(
                     scripts = scripts,

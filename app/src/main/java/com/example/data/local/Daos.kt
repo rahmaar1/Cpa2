@@ -132,6 +132,9 @@ interface ProxyDao {
     @Query("SELECT * FROM proxies ORDER BY lastUsedAt ASC LIMIT 1")
     suspend fun getNextProxy(): ProxyItem?
 
+    @Query("SELECT * FROM proxies WHERE status != 'failed' ORDER BY lastUsedAt ASC LIMIT 1")
+    suspend fun getNextWorkingProxy(): ProxyItem?
+
     @Query("SELECT * FROM proxies WHERE id = :id LIMIT 1")
     suspend fun getProxyById(id: Long): ProxyItem?
 
@@ -158,4 +161,13 @@ interface ProxyDao {
 
     @Query("UPDATE proxies SET status = :status, lastPingMs = :ping WHERE id = :id")
     suspend fun updateProxyStatus(id: Long, status: String, ping: Long)
+
+    @Query("UPDATE proxies SET status = :status, lastPingMs = :ping, country = :country WHERE id = :id")
+    suspend fun updateProxyStatusAndCountry(id: Long, status: String, ping: Long, country: String)
+
+    @Query("DELETE FROM proxies WHERE status = 'failed'")
+    suspend fun deleteFailedProxies(): Int
+
+    @Query("SELECT * FROM proxies WHERE status = 'working' ORDER BY lastPingMs ASC")
+    suspend fun getWorkingProxies(): List<ProxyItem>
 }

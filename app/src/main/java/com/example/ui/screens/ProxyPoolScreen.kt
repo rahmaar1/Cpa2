@@ -102,6 +102,9 @@ fun ProxyPoolScreen(
     onClearAll: () -> Unit,
     onToggleAutoRotate: (Boolean) -> Unit,
     onTestAllProxies: (((Int, Int) -> Unit, (Int, Int) -> Unit) -> Unit)? = null,
+    onDeleteFailed: (() -> Unit)? = null,
+    onAutoSelectFastest: (() -> Unit)? = null,
+    onExportWorking: (() -> String)? = null,
     modifier: Modifier = Modifier
 ) {
     val clipboardManager = LocalClipboardManager.current
@@ -268,43 +271,81 @@ fun ProxyPoolScreen(
                         onClick = {
                             urlInput = defaultAsocksUrl
                             selectedProtocol = "socks5"
+                            fetchFeedback = null
                         },
                         colors = ButtonDefaults.outlinedButtonColors(
                             containerColor = CpaPrimaryDim.copy(alpha = 0.5f),
                             contentColor = CpaPrimary
                         ),
                         border = ButtonDefaults.outlinedButtonBorder.copy(brush = androidx.compose.ui.graphics.SolidColor(CpaPrimaryBorder)),
-                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
+                        contentPadding = PaddingValues(horizontal = 6.dp, vertical = 2.dp),
                         modifier = Modifier.height(28.dp).weight(1f)
                     ) {
                         Icon(Icons.Default.Bolt, contentDescription = null, modifier = Modifier.size(12.dp))
                         Spacer(modifier = Modifier.width(4.dp))
-                        Text("Asocks (10 US)", fontSize = 10.sp, fontWeight = FontWeight.Bold, maxLines = 1)
+                        Text("Asocks (رابطك)", fontSize = 10.sp, fontWeight = FontWeight.Bold, maxLines = 1)
                     }
 
                     OutlinedButton(
                         onClick = {
-                            urlInput = IdentityService.DEFAULT_ASOCKS_URL
+                            urlInput = "https://raw.githubusercontent.com/TheSpeedX/SOCKS-List/master/socks5.txt"
                             selectedProtocol = "socks5"
+                            fetchFeedback = null
                         },
                         colors = ButtonDefaults.outlinedButtonColors(
                             containerColor = CpaPrimaryDim.copy(alpha = 0.3f),
                             contentColor = CpaPrimary
                         ),
                         border = ButtonDefaults.outlinedButtonBorder.copy(brush = androidx.compose.ui.graphics.SolidColor(CpaPrimaryBorder)),
-                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
+                        contentPadding = PaddingValues(horizontal = 6.dp, vertical = 2.dp),
                         modifier = Modifier.height(28.dp).weight(1f)
                     ) {
-                        Icon(Icons.Default.Bolt, contentDescription = null, modifier = Modifier.size(12.dp))
+                        Icon(Icons.Default.NetworkCheck, contentDescription = null, modifier = Modifier.size(12.dp))
                         Spacer(modifier = Modifier.width(4.dp))
-                        Text("Asocks (100 US)", fontSize = 10.sp, fontWeight = FontWeight.Bold, maxLines = 1)
+                        Text("Free SOCKS5", fontSize = 10.sp, fontWeight = FontWeight.Bold, maxLines = 1)
+                    }
+
+                    OutlinedButton(
+                        onClick = {
+                            urlInput = "https://raw.githubusercontent.com/TheSpeedX/SOCKS-List/master/http.txt"
+                            selectedProtocol = "http"
+                            fetchFeedback = null
+                        },
+                        colors = ButtonDefaults.outlinedButtonColors(
+                            containerColor = CpaPrimaryDim.copy(alpha = 0.3f),
+                            contentColor = CpaPrimary
+                        ),
+                        border = ButtonDefaults.outlinedButtonBorder.copy(brush = androidx.compose.ui.graphics.SolidColor(CpaPrimaryBorder)),
+                        contentPadding = PaddingValues(horizontal = 6.dp, vertical = 2.dp),
+                        modifier = Modifier.height(28.dp).weight(1f)
+                    ) {
+                        Icon(Icons.Default.NetworkCheck, contentDescription = null, modifier = Modifier.size(12.dp))
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text("Free HTTP", fontSize = 10.sp, fontWeight = FontWeight.Bold, maxLines = 1)
                     }
                 }
 
-                Spacer(modifier = Modifier.height(10.dp))
+                Spacer(modifier = Modifier.height(8.dp))
+
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(6.dp))
+                        .background(CpaCard)
+                        .padding(8.dp)
+                ) {
+                    Text(
+                        text = "💡 تنبيه Asocks: إذا ظهر 401 Unauthorized، قم بتسجيل الدخول إلى asocks.com وتجديد رابط التصدير (Export Link) أو انسخ البروكسيات والصقها مباشرة هنا.",
+                        color = CpaAccent,
+                        fontSize = 10.sp,
+                        lineHeight = 14.sp
+                    )
+                }
+
+                Spacer(modifier = Modifier.height(8.dp))
 
                 Text(
-                    text = "Direct proxy list URL (plain text IP:Port or user:pass@host:port). Supports Asocks, Webshare, etc.",
+                    text = "أدخل رابط التصدير من Asocks أو Webshare، أو الصق قائمة البروكسيات مباشرة (IP:Port أو user:pass@host:port):",
                     color = CpaTextDim,
                     fontSize = 11.sp,
                     lineHeight = 15.sp
@@ -537,62 +578,167 @@ fun ProxyPoolScreen(
             }
         }
 
-        // --- 4. Proxies List Section Header ---
+        // --- 4. Proxies List Section Header & Quick Action Toolbar ---
         item {
-            Row(
+            val workingCount = proxies.count { it.status == "working" }
+            val failedCount = proxies.count { it.status == "failed" }
+            val untestedCount = proxies.size - workingCount - failedCount
+
+            Column(
                 modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
+                verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                Column {
-                    Text(
-                        text = "AVAILABLE PROXIES (${proxies.size})",
-                        color = CpaTextDim,
-                        fontSize = 11.sp,
-                        fontWeight = FontWeight.Bold,
-                        letterSpacing = 1.sp
-                    )
-                    if (proxies.isNotEmpty()) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column {
                         Text(
-                            text = "Touch to set as active proxy",
-                            color = CpaTextMuted,
-                            fontSize = 10.sp
+                            text = "AVAILABLE PROXIES (${proxies.size})",
+                            color = CpaTextDim,
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Bold,
+                            letterSpacing = 1.sp
                         )
+                        if (proxies.isNotEmpty()) {
+                            Text(
+                                text = "اضغط على أي بروكسي لتعيينه كبروكسي نشط",
+                                color = CpaTextMuted,
+                                fontSize = 10.sp
+                            )
+                        }
+                    }
+
+                    // Status Badges
+                    if (proxies.isNotEmpty()) {
+                        Row(
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(4.dp))
+                                    .background(CpaSuccess.copy(alpha = 0.2f))
+                                    .padding(horizontal = 6.dp, vertical = 2.dp)
+                            ) {
+                                Text("$workingCount شغال", color = CpaSuccess, fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                            }
+                            if (failedCount > 0) {
+                                Box(
+                                    modifier = Modifier
+                                        .clip(RoundedCornerShape(4.dp))
+                                        .background(CpaError.copy(alpha = 0.2f))
+                                        .padding(horizontal = 6.dp, vertical = 2.dp)
+                                ) {
+                                    Text("$failedCount معطل", color = CpaError, fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                                }
+                            }
+                        }
                     }
                 }
 
-                if (proxies.isNotEmpty() && onTestAllProxies != null) {
-                    Button(
-                        onClick = {
-                            isTestingAll = true
-                            testingAllProgress = "Testing 0/${proxies.size}..."
-                            onTestAllProxies(
-                                { current, total ->
-                                    testingAllProgress = "Testing $current/$total..."
-                                },
-                                { _, _ ->
-                                    isTestingAll = false
-                                    testingAllProgress = null
-                                }
-                            )
-                        },
-                        enabled = !isTestingAll,
-                        colors = ButtonDefaults.buttonColors(
-                            containerColor = CpaPrimary,
-                            contentColor = Color.Black
-                        ),
-                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
-                        shape = RoundedCornerShape(6.dp),
-                        modifier = Modifier.height(30.dp).testTag("test_all_proxies_button")
+                // Quick Action Bar
+                if (proxies.isNotEmpty()) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
                     ) {
-                        if (isTestingAll) {
-                            CircularProgressIndicator(modifier = Modifier.size(12.dp), color = Color.Black, strokeWidth = 2.dp)
-                            Spacer(modifier = Modifier.width(6.dp))
-                            Text(testingAllProgress ?: "Testing...", fontSize = 10.sp, fontWeight = FontWeight.Bold)
-                        } else {
-                            Icon(Icons.Default.Speed, contentDescription = null, modifier = Modifier.size(14.dp))
-                            Spacer(modifier = Modifier.width(4.dp))
-                            Text("Test All Proxies", fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                        // Test All
+                        if (onTestAllProxies != null) {
+                            Button(
+                                onClick = {
+                                    isTestingAll = true
+                                    testingAllProgress = "0/${proxies.size}"
+                                    onTestAllProxies(
+                                        { current, total ->
+                                            testingAllProgress = "$current/$total"
+                                        },
+                                        { _, _ ->
+                                            isTestingAll = false
+                                            testingAllProgress = null
+                                        }
+                                    )
+                                },
+                                enabled = !isTestingAll,
+                                colors = ButtonDefaults.buttonColors(
+                                    containerColor = CpaPrimary,
+                                    contentColor = Color.Black
+                                ),
+                                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
+                                shape = RoundedCornerShape(6.dp),
+                                modifier = Modifier.height(28.dp).weight(1f).testTag("test_all_proxies_button")
+                            ) {
+                                if (isTestingAll) {
+                                    CircularProgressIndicator(modifier = Modifier.size(10.dp), color = Color.Black, strokeWidth = 2.dp)
+                                    Spacer(modifier = Modifier.width(4.dp))
+                                    Text(testingAllProgress ?: "...", fontSize = 9.sp, fontWeight = FontWeight.Bold)
+                                } else {
+                                    Icon(Icons.Default.Speed, contentDescription = null, modifier = Modifier.size(12.dp))
+                                    Spacer(modifier = Modifier.width(3.dp))
+                                    Text("فحص الكل", fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                                }
+                            }
+                        }
+
+                        // Auto Fastest
+                        if (onAutoSelectFastest != null) {
+                            OutlinedButton(
+                                onClick = { onAutoSelectFastest() },
+                                colors = ButtonDefaults.outlinedButtonColors(
+                                    containerColor = CpaCard,
+                                    contentColor = CpaPrimary
+                                ),
+                                border = ButtonDefaults.outlinedButtonBorder.copy(brush = androidx.compose.ui.graphics.SolidColor(CpaPrimaryBorder)),
+                                contentPadding = PaddingValues(horizontal = 6.dp, vertical = 2.dp),
+                                shape = RoundedCornerShape(6.dp),
+                                modifier = Modifier.height(28.dp).weight(1f).testTag("auto_select_fastest_button")
+                            ) {
+                                Icon(Icons.Default.Bolt, contentDescription = null, modifier = Modifier.size(12.dp))
+                                Spacer(modifier = Modifier.width(3.dp))
+                                Text("الأسرع", fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                            }
+                        }
+
+                        // Delete Failed
+                        if (onDeleteFailed != null && failedCount > 0) {
+                            OutlinedButton(
+                                onClick = { onDeleteFailed() },
+                                colors = ButtonDefaults.outlinedButtonColors(
+                                    containerColor = CpaCard,
+                                    contentColor = CpaError
+                                ),
+                                border = ButtonDefaults.outlinedButtonBorder.copy(brush = androidx.compose.ui.graphics.SolidColor(CpaError.copy(alpha = 0.5f))),
+                                contentPadding = PaddingValues(horizontal = 6.dp, vertical = 2.dp),
+                                shape = RoundedCornerShape(6.dp),
+                                modifier = Modifier.height(28.dp).weight(1f).testTag("delete_failed_proxies_button")
+                            ) {
+                                Icon(Icons.Default.Delete, contentDescription = null, modifier = Modifier.size(12.dp))
+                                Spacer(modifier = Modifier.width(3.dp))
+                                Text("حذف المعطلة", fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                            }
+                        }
+
+                        // Export Working
+                        if (onExportWorking != null && workingCount > 0) {
+                            OutlinedButton(
+                                onClick = {
+                                    val exported = onExportWorking()
+                                    clipboardManager.setText(androidx.compose.ui.text.AnnotatedString(exported))
+                                },
+                                colors = ButtonDefaults.outlinedButtonColors(
+                                    containerColor = CpaCard,
+                                    contentColor = CpaSuccess
+                                ),
+                                border = ButtonDefaults.outlinedButtonBorder.copy(brush = androidx.compose.ui.graphics.SolidColor(CpaSuccess.copy(alpha = 0.5f))),
+                                contentPadding = PaddingValues(horizontal = 6.dp, vertical = 2.dp),
+                                shape = RoundedCornerShape(6.dp),
+                                modifier = Modifier.height(28.dp).weight(1f).testTag("export_working_proxies_button")
+                            ) {
+                                Icon(Icons.Default.ContentPaste, contentDescription = null, modifier = Modifier.size(12.dp))
+                                Spacer(modifier = Modifier.width(3.dp))
+                                Text("نسخ الشغالة", fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                            }
                         }
                     }
                 }

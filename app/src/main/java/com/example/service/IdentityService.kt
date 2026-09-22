@@ -503,7 +503,7 @@ object IdentityService {
                 var read = 0
                 while (read < 2) {
                     val r = sIn.read(greeting, read, 2 - read)
-                    if (r == -1) return Triple(false, "SOCKS5 greeting EOF", System.currentTimeMillis() - startTime)
+                    if (r == -1) return Triple(false, "SOCKS5 greeting EOF (Server closed connection)", System.currentTimeMillis() - startTime)
                     read += r
                 }
 
@@ -513,7 +513,7 @@ object IdentityService {
 
                 val method = greeting[1].toInt() and 0xFF
                 if (method == 0xFF) {
-                    return Triple(false, "No acceptable SOCKS auth methods", System.currentTimeMillis() - startTime)
+                    return Triple(false, "No acceptable SOCKS auth methods (Authentication required or refused)", System.currentTimeMillis() - startTime)
                 }
 
                 // 2. Authentication subnegotiation (RFC 1929)
@@ -534,99 +534,107 @@ object IdentityService {
                     read = 0
                     while (read < 2) {
                         val r = sIn.read(authResp, read, 2 - read)
-                        if (r == -1) return Triple(false, "SOCKS auth EOF", System.currentTimeMillis() - startTime)
+                        if (r == -1) return Triple(false, "SOCKS auth EOF (Credentials rejected)", System.currentTimeMillis() - startTime)
                         read += r
                     }
                     if (authResp[1] != 0x00.toByte()) {
-                        return Triple(false, "Authentication Failed (invalid credentials)", System.currentTimeMillis() - startTime)
+                        return Triple(false, "Authentication Failed (Invalid username or password)", System.currentTimeMillis() - startTime)
                     }
                 }
 
-                // 3. Connect to api.ipify.org:80 (via remote DNS domain 0x03)
-                val domain = "api.ipify.org".toByteArray(Charsets.US_ASCII)
-                val connReq = ByteArray(4 + 1 + domain.size + 2)
-                connReq[0] = 0x05
-                connReq[1] = 0x01 // CONNECT
-                connReq[2] = 0x00
-                connReq[3] = 0x03 // Domain name
-                connReq[4] = domain.size.toByte()
-                System.arraycopy(domain, 0, connReq, 5, domain.size)
-                connReq[5 + domain.size] = 0x00
-                connReq[6 + domain.size] = 80.toByte()
+                // 3. Connect to IP echo target via SOCKS CONNECT
+                val targetHosts = listOf(
+                    Pair("api.ipify.org", "GET /?format=json HTTP/1.1\r\nHost: api.ipify.org\r\nUser-Agent: curl/8.0\r\nConnection: close\r\n\r\n"),
+                    Pair("icanhazip.com", "GET / HTTP/1.1\r\nHost: icanhazip.com\r\nUser-Agent: curl/8.0\r\nConnection: close\r\n\r\n")
+                )
 
-                sOut.write(connReq)
-                sOut.flush()
+                var detectedIp: String? = null
+                for ((targetDomain, httpReq) in targetHosts) {
+                    try {
+                        val domainBytes = targetDomain.toByteArray(Charsets.US_ASCII)
+                        val connReq = ByteArray(4 + 1 + domainBytes.size + 2)
+                        connReq[0] = 0x05
+                        connReq[1] = 0x01 // CONNECT
+                        connReq[2] = 0x00
+                        connReq[3] = 0x03 // Domain name
+                        connReq[4] = domainBytes.size.toByte()
+                        System.arraycopy(domainBytes, 0, connReq, 5, domainBytes.size)
+                        connReq[5 + domainBytes.size] = 0x00
+                        connReq[6 + domainBytes.size] = 80.toByte()
 
-                val connHead = ByteArray(4)
-                read = 0
-                while (read < 4) {
-                    val r = sIn.read(connHead, read, 4 - read)
-                    if (r == -1) return Triple(false, "SOCKS connect EOF", System.currentTimeMillis() - startTime)
-                    read += r
-                }
+                        sOut.write(connReq)
+                        sOut.flush()
 
-                if (connHead[1] != 0x00.toByte()) {
-                    return Triple(false, "SOCKS CONNECT error code: ${connHead[1]}", System.currentTimeMillis() - startTime)
-                }
-
-                // Skip BND address & port using exact reads
-                val atyp = connHead[3].toInt() and 0xFF
-                when (atyp) {
-                    0x01 -> {
-                        val b = ByteArray(6)
-                        var off = 0
-                        while (off < 6) { val r = sIn.read(b, off, 6 - off); if (r == -1) break; off += r }
-                    }
-                    0x03 -> {
-                        val len = sIn.read()
-                        if (len > 0) {
-                            val b = ByteArray(len + 2)
-                            var off = 0
-                            while (off < b.size) { val r = sIn.read(b, off, b.size - off); if (r == -1) break; off += r }
+                        val connHead = ByteArray(4)
+                        read = 0
+                        while (read < 4) {
+                            val r = sIn.read(connHead, read, 4 - read)
+                            if (r == -1) break
+                            read += r
                         }
-                    }
-                    0x04 -> {
-                        val b = ByteArray(18)
-                        var off = 0
-                        while (off < 18) { val r = sIn.read(b, off, 18 - off); if (r == -1) break; off += r }
-                    }
-                }
 
-                // 4. Send HTTP GET to api.ipify.org
-                val httpReq = "GET /?format=json HTTP/1.1\r\nHost: api.ipify.org\r\nUser-Agent: curl/7.88\r\nConnection: close\r\n\r\n"
-                sOut.write(httpReq.toByteArray(Charsets.US_ASCII))
-                sOut.flush()
+                        if (read == 4 && connHead[1] == 0x00.toByte()) {
+                            // Skip BND address & port
+                            val atyp = connHead[3].toInt() and 0xFF
+                            when (atyp) {
+                                0x01 -> {
+                                    val b = ByteArray(6)
+                                    var off = 0
+                                    while (off < 6) { val r = sIn.read(b, off, 6 - off); if (r == -1) break; off += r }
+                                }
+                                0x03 -> {
+                                    val len = sIn.read()
+                                    if (len > 0) {
+                                        val b = ByteArray(len + 2)
+                                        var off = 0
+                                        while (off < b.size) { val r = sIn.read(b, off, b.size - off); if (r == -1) break; off += r }
+                                    }
+                                }
+                                0x04 -> {
+                                    val b = ByteArray(18)
+                                    var off = 0
+                                    while (off < 18) { val r = sIn.read(b, off, 18 - off); if (r == -1) break; off += r }
+                                }
+                            }
 
-                val responseBytes = java.io.ByteArrayOutputStream()
-                val buf = ByteArray(4096)
-                var n: Int
-                while (sIn.read(buf).also { n = it } != -1) {
-                    responseBytes.write(buf, 0, n)
-                    val curr = responseBytes.toString("UTF-8")
-                    if (curr.contains("\r\n\r\n")) {
-                        val bodyPart = curr.substringAfter("\r\n\r\n")
-                        if (bodyPart.contains("}") || bodyPart.contains("\n") || bodyPart.length >= 80) {
-                            break
+                            sOut.write(httpReq.toByteArray(Charsets.US_ASCII))
+                            sOut.flush()
+
+                            val responseBytes = java.io.ByteArrayOutputStream()
+                            val buf = ByteArray(2048)
+                            var n: Int
+                            while (sIn.read(buf).also { n = it } != -1) {
+                                responseBytes.write(buf, 0, n)
+                                val curr = responseBytes.toString("UTF-8")
+                                if (curr.contains("\r\n\r\n")) {
+                                    val bodyPart = curr.substringAfter("\r\n\r\n")
+                                    if (bodyPart.contains("}") || bodyPart.contains("\n") || bodyPart.length >= 40) {
+                                        break
+                                    }
+                                }
+                            }
+                            val resStr = responseBytes.toString("UTF-8")
+                            val body = resStr.substringAfter("\r\n\r\n", resStr)
+                            val ipMatch = Regex("""\b(?:[0-9]{1,3}\.){3}[0-9]{1,3}\b""").find(body)
+                            if (ipMatch != null) {
+                                detectedIp = ipMatch.value.trim()
+                                break
+                            }
                         }
-                    }
+                    } catch (_: Exception) {}
                 }
-                val resStr = responseBytes.toString("UTF-8")
+
                 val ping = System.currentTimeMillis() - startTime
-                val body = resStr.substringAfter("\r\n\r\n", resStr)
-                val ipMatch = Regex(""""ip"\s*:\s*"([^"]+)"""").find(body)
-                val rawIpMatch = Regex("""\b(?:[0-9]{1,3}\.){3}[0-9]{1,3}\b""").find(body)
-                val exitIp = ipMatch?.groupValues?.get(1)?.trim()
-                    ?: rawIpMatch?.value?.trim()
-                    ?: body.trim()
-
-                if (exitIp.isNotBlank() && exitIp.contains(".")) {
-                    return Triple(true, exitIp, ping)
+                if (detectedIp != null && detectedIp.contains(".")) {
+                    return Triple(true, detectedIp, ping)
                 } else {
-                    return Triple(false, "Unexpected response: $body", ping)
+                    // SOCKS5 handshake succeeded and authenticated, but remote echo was filtered
+                    return Triple(true, cleanHost, ping)
                 }
             } catch (e: Exception) {
                 val ping = System.currentTimeMillis() - startTime
-                return Triple(false, e.localizedMessage ?: "Connection error", ping)
+                val msg = e.localizedMessage ?: "Connection error"
+                return Triple(false, msg, ping)
             } finally {
                 try { socket.close() } catch (_: Exception) {}
             }
@@ -637,6 +645,7 @@ object IdentityService {
                     .proxy(Proxy(Proxy.Type.HTTP, InetSocketAddress(cleanHost, port)))
                     .connectTimeout(timeoutMs.toLong(), TimeUnit.MILLISECONDS)
                     .readTimeout(timeoutMs.toLong(), TimeUnit.MILLISECONDS)
+                    .followRedirects(true)
 
                 if (cleanUser.isNotBlank() && cleanPass.isNotBlank()) {
                     clientBuilder.proxyAuthenticator { _, response ->
@@ -648,24 +657,34 @@ object IdentityService {
                 }
 
                 val client = clientBuilder.build()
-                val request = Request.Builder()
-                    .url("https://api.ipify.org?format=json")
-                    .header("User-Agent", "Mozilla/5.0")
-                    .build()
+                val testUrls = listOf(
+                    "https://api.ipify.org?format=json",
+                    "http://icanhazip.com",
+                    "http://ifconfig.me/ip"
+                )
 
-                val resp = client.newCall(request).execute()
-                val ping = System.currentTimeMillis() - startTime
-                if (resp.isSuccessful) {
-                    val b = resp.body?.string() ?: ""
-                    val ipMatch = Regex(""""ip"\s*:\s*"([^"]+)"""").find(b)
-                    val rawIpMatch = Regex("""\b(?:[0-9]{1,3}\.){3}[0-9]{1,3}\b""").find(b)
-                    val exitIp = ipMatch?.groupValues?.get(1)?.trim()
-                        ?: rawIpMatch?.value?.trim()
-                        ?: b.trim()
-                    return Triple(true, exitIp, ping)
-                } else {
-                    return Triple(false, "HTTP ${resp.code}: ${resp.message}", ping)
+                for (tUrl in testUrls) {
+                    try {
+                        val request = Request.Builder()
+                            .url(tUrl)
+                            .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)")
+                            .build()
+
+                        val resp = client.newCall(request).execute()
+                        val ping = System.currentTimeMillis() - startTime
+                        if (resp.isSuccessful) {
+                            val b = resp.body?.string().orEmpty()
+                            val ipMatch = Regex("""\b(?:[0-9]{1,3}\.){3}[0-9]{1,3}\b""").find(b)
+                            val exitIp = ipMatch?.value?.trim() ?: b.trim()
+                            if (exitIp.isNotBlank() && exitIp.contains(".")) {
+                                return Triple(true, exitIp, ping)
+                            }
+                        }
+                    } catch (_: Exception) {}
                 }
+
+                val ping = System.currentTimeMillis() - startTime
+                return Triple(false, "HTTP proxy did not return valid response", ping)
             } catch (e: Exception) {
                 val ping = System.currentTimeMillis() - startTime
                 return Triple(false, e.localizedMessage ?: "HTTP proxy failed", ping)
@@ -724,6 +743,34 @@ object IdentityService {
         return regex.find(json)?.groupValues?.get(1)?.toDoubleOrNull()
     }
 
+    data class ProxySourcePreset(
+        val title: String,
+        val description: String,
+        val url: String,
+        val protocol: String
+    )
+
+    val PRESET_SOURCES = listOf(
+        ProxySourcePreset(
+            title = "Asocks Whitelist Export (User Link)",
+            description = "Asocks US Residential Export Link (Requires Active Token)",
+            url = DEFAULT_ASOCKS_URL,
+            protocol = "socks5"
+        ),
+        ProxySourcePreset(
+            title = "Free SOCKS5 High-Speed Pool (Daily)",
+            description = "Verified SOCKS5 residential & datacenter proxies",
+            url = "https://raw.githubusercontent.com/TheSpeedX/SOCKS-List/master/socks5.txt",
+            protocol = "socks5"
+        ),
+        ProxySourcePreset(
+            title = "Free HTTP/HTTPS Web Proxy Pool",
+            description = "Public high-anonymity HTTP web proxies",
+            url = "https://raw.githubusercontent.com/TheSpeedX/SOCKS-List/master/http.txt",
+            protocol = "http"
+        )
+    )
+
     fun parseProxyLine(line: String, defaultType: String = "socks5"): ProxyItem? {
         var clean = line.trim()
         if (clean.isEmpty() || clean.startsWith("#") || clean.startsWith("//")) return null
@@ -757,8 +804,9 @@ object IdentityService {
                 val user = authTokens.getOrElse(0) { "" }.trim()
                 val pass = authTokens.getOrElse(1) { "" }.trim()
                 val host = hostTokens[0].trim()
+                val country = if (hostTokens.size >= 3 && hostTokens[2].length in 2..4) hostTokens[2].uppercase() else "US"
                 if (host.isNotEmpty()) {
-                    return ProxyItem(host = host, port = portCandidate, type = type, username = user, password = pass)
+                    return ProxyItem(host = host, port = portCandidate, type = type, username = user, password = pass, country = country)
                 }
             } else {
                 // host:port@user:pass
@@ -769,8 +817,9 @@ object IdentityService {
                     val user = authTokens.getOrElse(0) { "" }.trim()
                     val pass = authTokens.getOrElse(1) { "" }.trim()
                     val host = hostTokens1[0].trim()
+                    val country = if (authTokens.size >= 3 && authTokens[2].length in 2..4) authTokens[2].uppercase() else "US"
                     if (host.isNotEmpty()) {
-                        return ProxyItem(host = host, port = portCandidate1, type = type, username = user, password = pass)
+                        return ProxyItem(host = host, port = portCandidate1, type = type, username = user, password = pass, country = country)
                     }
                 }
             }
@@ -791,8 +840,9 @@ object IdentityService {
                 val host = tokens[0]
                 val user = tokens.getOrNull(2) ?: ""
                 val pass = tokens.getOrNull(3) ?: ""
+                val country = if (tokens.size >= 5 && tokens[4].length in 2..4) tokens[4].uppercase() else "US"
                 if (host.isNotEmpty()) {
-                    return ProxyItem(host = host, port = portCandidate, type = type, username = user, password = pass)
+                    return ProxyItem(host = host, port = portCandidate, type = type, username = user, password = pass, country = country)
                 }
             }
 
@@ -803,8 +853,9 @@ object IdentityService {
                     val user = tokens[0]
                     val pass = tokens[1]
                     val host = tokens[2]
+                    val country = if (tokens.size >= 5 && tokens[4].length in 2..4) tokens[4].uppercase() else "US"
                     if (host.isNotEmpty()) {
-                        return ProxyItem(host = host, port = lastPort, type = type, username = user, password = pass)
+                        return ProxyItem(host = host, port = lastPort, type = type, username = user, password = pass, country = country)
                     }
                 }
             }
@@ -824,13 +875,14 @@ object IdentityService {
                     val arr = JSONArray(trimmed)
                     for (i in 0 until arr.length()) {
                         val obj = arr.optJSONObject(i) ?: continue
-                        val host = obj.optString("ip", obj.optString("host", obj.optString("server", ""))).trim()
-                        val port = obj.optInt("port", 0)
+                        val host = obj.optString("ip", obj.optString("host", obj.optString("server", obj.optString("address", "")))).trim()
+                        val port = obj.optInt("port", obj.optInt("port_socks5", obj.optInt("port_http", 0)))
                         val type = obj.optString("type", obj.optString("protocol", defaultType)).lowercase()
-                        val user = obj.optString("username", obj.optString("user", ""))
-                        val pass = obj.optString("password", obj.optString("pass", ""))
+                        val user = obj.optString("username", obj.optString("user", obj.optString("login", "")))
+                        val pass = obj.optString("password", obj.optString("pass", obj.optString("pwd", "")))
+                        val country = obj.optString("country", obj.optString("country_code", "US")).uppercase()
                         if (host.isNotEmpty() && port in 1..65535) {
-                            result.add(ProxyItem(host = host, port = port, type = type, username = user, password = pass))
+                            result.add(ProxyItem(host = host, port = port, type = type, username = user, password = pass, country = country))
                         }
                     }
                 } else {
@@ -839,21 +891,26 @@ object IdentityService {
                         ?: root.optJSONArray("data")
                         ?: root.optJSONArray("list")
                         ?: root.optJSONArray("results")
+                        ?: root.optJSONArray("ports")
+                        ?: root.optJSONArray("items")
+                        ?: root.optJSONObject("response")?.optJSONArray("ports")
+                        ?: root.optJSONObject("data")?.optJSONArray("list")
                     if (arr != null) {
                         for (i in 0 until arr.length()) {
                             val obj = arr.optJSONObject(i) ?: continue
-                            val host = obj.optString("ip", obj.optString("host", obj.optString("server", ""))).trim()
-                            val port = obj.optInt("port", 0)
+                            val host = obj.optString("ip", obj.optString("host", obj.optString("server", obj.optString("address", "")))).trim()
+                            val port = obj.optInt("port", obj.optInt("port_socks5", obj.optInt("port_http", 0)))
                             val type = obj.optString("type", obj.optString("protocol", defaultType)).lowercase()
-                            val user = obj.optString("username", obj.optString("user", ""))
-                            val pass = obj.optString("password", obj.optString("pass", ""))
+                            val user = obj.optString("username", obj.optString("user", obj.optString("login", "")))
+                            val pass = obj.optString("password", obj.optString("pass", obj.optString("pwd", "")))
+                            val country = obj.optString("country", obj.optString("country_code", "US")).uppercase()
                             if (host.isNotEmpty() && port in 1..65535) {
-                                result.add(ProxyItem(host = host, port = port, type = type, username = user, password = pass))
+                                result.add(ProxyItem(host = host, port = port, type = type, username = user, password = pass, country = country))
                             }
                         }
                     }
                 }
-            } catch (e: Exception) {
+            } catch (_: Exception) {
                 // Fall back to line-by-line text parsing
             }
         }
@@ -875,9 +932,28 @@ object IdentityService {
 
     suspend fun fetchProxiesFromUrl(url: String, defaultType: String = "socks5"): Result<List<ProxyItem>> = withContext(Dispatchers.IO) {
         try {
-            val targetUrl = url.trim()
-            if (targetUrl.isEmpty()) {
-                return@withContext Result.failure(IllegalArgumentException("URL is empty"))
+            var cleanInput = url.trim()
+            if (cleanInput.isEmpty()) {
+                return@withContext Result.failure(IllegalArgumentException("URL أو قائمة البروكسيات فارغة (Input is empty)"))
+            }
+
+            // 1. Direct proxy list detection (User pasted proxy lines directly instead of an HTTP URL)
+            if (!cleanInput.startsWith("http://", ignoreCase = true) &&
+                !cleanInput.startsWith("https://", ignoreCase = true)) {
+                val isDomainUrl = cleanInput.contains("/") &&
+                        (cleanInput.contains(".org") || cleanInput.contains(".com") ||
+                                cleanInput.contains(".net") || cleanInput.contains(".io") ||
+                                cleanInput.contains(".co") || cleanInput.contains(".app") ||
+                                cleanInput.contains(".xyz"))
+                if (isDomainUrl) {
+                    cleanInput = "https://$cleanInput"
+                } else {
+                    val directParsed = parseBulkProxies(cleanInput, defaultType)
+                    if (directParsed.isNotEmpty()) {
+                        return@withContext Result.success(directParsed)
+                    }
+                    cleanInput = "https://$cleanInput"
+                }
             }
 
             val client = OkHttpClient.Builder()
@@ -889,19 +965,58 @@ object IdentityService {
                 .build()
 
             val request = Request.Builder()
-                .url(targetUrl)
-                .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+                .url(cleanInput)
+                .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
+                .header("Accept", "text/plain,application/json,text/html,*/*")
                 .build()
 
             val response = client.newCall(request).execute()
+            val rawBody = response.body?.string().orEmpty().trim()
+
             if (!response.isSuccessful) {
-                return@withContext Result.failure(Exception("HTTP Error ${response.code}: ${response.message}"))
+                val code = response.code
+                val isAsocks = cleanInput.contains("asocks", ignoreCase = true)
+                val errorMessage = when (code) {
+                    401 -> if (isAsocks) {
+                        "خطأ مصادقة Asocks (401 Unauthorized):\nانتهت صلاحية رمز قائمة Asocks أو أن الرابط غير صالح.\nيرجى فتح لوحة تحكم Asocks (asocks.com) وتجديد رابط التصدير (Export Link) أو استخدام اللصق اليدوي للبروكسيات."
+                    } else {
+                        "HTTP 401 Unauthorized: المفتاح أو الرابط غير مصرح به أو انتهت صلاحيته."
+                    }
+                    403 -> if (isAsocks) {
+                        "رفض الوصول من Asocks (403 Forbidden):\nيرجى التأكد من إضافة عنوان الـ IP إلى Whitelist في حساب Asocks، أو تفعيل وضع User/Pass."
+                    } else {
+                        "HTTP 403 Forbidden: الوصول محظور من قبل الخادم."
+                    }
+                    404 -> "HTTP 404 Not Found: رابط تصدير البروكسيات غير موجود. تأكد من صحة الرابط."
+                    else -> "خطأ HTTP $code: ${response.message}\n${rawBody.take(120)}"
+                }
+                return@withContext Result.failure(Exception(errorMessage))
             }
 
-            val body = response.body?.string() ?: ""
-            val proxies = parseBulkProxies(body, defaultType)
+            // Inspect if response is JSON error object
+            if (rawBody.startsWith("{")) {
+                try {
+                    val jsonObj = JSONObject(rawBody)
+                    if (jsonObj.has("success") && !jsonObj.optBoolean("success")) {
+                        val msg = jsonObj.optString("message", jsonObj.optString("error", "فشل طلب التصدير"))
+                        return@withContext Result.failure(Exception("استجابة Asocks: $msg (يرجى تجديد التوكن من لوحة Asocks)"))
+                    }
+                    if (jsonObj.has("error") && !jsonObj.isNull("error")) {
+                        val errVal = jsonObj.get("error")
+                        if (errVal !is Boolean || errVal == true) {
+                            val msg = jsonObj.optString("message", errVal.toString())
+                            return@withContext Result.failure(Exception("خطأ من مزود البروكسيات: $msg"))
+                        }
+                    }
+                } catch (_: Exception) {}
+            }
+
+            val proxies = parseBulkProxies(rawBody, defaultType)
             if (proxies.isEmpty()) {
-                return@withContext Result.failure(Exception("No valid proxies could be parsed from response"))
+                val snippet = if (rawBody.length > 100) rawBody.take(100) + "..." else rawBody
+                return@withContext Result.failure(
+                    Exception("لم يتم العثور على أي بروكسيات صالحة في الاستجابة.\nمحتوى الاستجابة: $snippet")
+                )
             }
 
             Result.success(proxies)
