@@ -7,3 +7,9 @@ plugins {
   alias(libs.plugins.secrets) apply false
   alias(libs.plugins.google.services) apply false
 }
+
+tasks.register("copyDebugApkToProjectRoot") {
+  description = "Copies the assembled debug APK to the project root directory as app-debug.apk"
+  group = "build"
+  dependsOn(":app:copyDebugApkToProjectRoot")
+}
